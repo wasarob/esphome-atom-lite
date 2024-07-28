@@ -1,0 +1,166 @@
+#substitutions:
+#  name: esphome-web-xxxxxx
+#  friendly_name: Dallas xxxxxx <red> <location>
+#  api_key: abcdefg=
+#  led_red: 100%
+#  led_green: 0%
+#  led_blue: 0%
+#  fan_pin: nn
+#  dallas_pin: nn
+#  sensor_name: Thermometer <red>
+#  ap_ssid: Esphome-Web-xxxxx
+#  ap_pw: abcdefg=
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: $api_key
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: $ap_ssid
+    password: $ap_pw
+
+captive_portal:
+
+esphome:
+  name: $name
+  friendly_name: $friendly_name
+
+  on_boot:
+    then:
+      - light.turn_on:
+          id: status_led
+          effect: slow
+
+          # Change color to identify unit
+          red: ${led_red}
+          green: ${led_green}
+          blue: ${led_blue}
+
+# Enable Dallas/DS18B20 one-wire "hub"
+one_wire:
+  - platform: gpio
+    pin: $dallas_pin
+
+# Configure Atom Lite button LED
+light:
+  - platform: neopixelbus
+    type: GRB
+    variant: SK6812
+    pin: GPIO27
+    num_leds: 1
+    id: status_led
+    internal: true
+
+    effects:
+      - pulse:
+          name: slow
+          transition_length: 1s
+          update_interval: 2s
+          min_brightness: 0%
+          max_brightness: 30%
+      - pulse:
+          name: fast
+          transition_length: 1s
+          update_interval: 1s
+          min_brightness: 0%
+          max_brightness: 30%
+
+# Expose fan temporature config to home assistant
+number:
+  - platform: template
+    name: "Fan min temp"
+    id: fan_min_temp
+    optimistic: true
+    min_value: 20
+    max_value: 30
+    step: 0.5
+    initial_value: 25.5 # default 0.5 deg of hysteresis
+
+  - platform: template
+    name: "Fan max temp"
+    id: fan_max_temp
+    optimistic: true
+    min_value: 20
+    max_value: 30
+    step: 0.5
+    initial_value: 26 # default 1 deg above typical 25 deg
+
+# Use GPIO "switch" to control fan
+switch:
+  - platform: gpio
+    pin: $fan_pin
+    id: usb_fan
+    name: "USB fan"
+
+    on_turn_on:
+      - delay: 1ms
+      - light.control:
+          id: status_led
+          effect: fast
+
+    on_turn_off:
+      - delay: 1ms
+      - light.control:
+          id: status_led
+          effect: slow
+
+# Connect Atom Lite physical button to switch
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO39
+      inverted: true
+    name: Button
+    on_press:
+      then:
+        - switch.toggle: usb_fan
+
+script:
+  - id: log_state
+    then:
+      - logger.log:
+          format: "Sensor value %.1f (min %.1f, max %.1f)"
+          args:
+            [
+              "id(dallas_sensor).state",
+              "id(fan_min_temp).state",
+              "id(fan_max_temp).state",
+            ]
+
+# Temperature sensor with fan state control
+sensor:
+  - platform: dallas_temp
+    name: $sensor_name
+    id: dallas_sensor
+    update_interval: 10s
+
+    on_value:
+      then:
+        - script.execute: log_state
+        - if:
+            condition:
+              lambda: return (x < id(fan_min_temp).state);
+            then:
+              - switch.turn_off: usb_fan
+        - if:
+            condition:
+              lambda: return (x > id(fan_max_temp).state);
+            then:
+              - switch.turn_on: usb_fan
